@@ -1,0 +1,933 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>YOLO Detector</title>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+  :root {
+    --bg: #080c10;
+    --surface: #0e1419;
+    --surface2: #151c24;
+    --accent: #00e5ff;
+    --accent2: #00ff94;
+    --warn: #ffb300;
+    --danger: #ff4444;
+    --text: #e8f0f8;
+    --muted: #5a7a96;
+    --border: rgba(0,229,255,0.12);
+  }
+
+  html, body {
+    width: 100%; height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+    overflow: hidden;
+  }
+
+  #app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  /* ── Header ── */
+  header {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    z-index: 10;
+  }
+
+  .logo { display: flex; align-items: center; gap: 8px; }
+
+  .logo-icon {
+    width: 28px; height: 28px;
+    border: 1.5px solid var(--accent);
+    border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    position: relative; overflow: hidden;
+  }
+
+  .logo-icon::before {
+    content: '';
+    position: absolute; inset: 0;
+    background: linear-gradient(135deg, rgba(0,229,255,0.15), transparent);
+  }
+
+  .logo-icon svg { width: 16px; height: 16px; }
+
+  .logo-text {
+    font-size: 13px; font-weight: 700;
+    letter-spacing: 2px; color: var(--accent);
+    text-transform: uppercase;
+  }
+
+  .status-pill {
+    display: flex; align-items: center; gap: 6px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 20px; padding: 5px 10px;
+    font-size: 11px; letter-spacing: 1px;
+    color: var(--muted); transition: all 0.3s;
+  }
+
+  .status-pill.active  { color: var(--accent2); border-color: rgba(0,255,148,0.25); }
+  .status-pill.loading { color: var(--warn);    border-color: rgba(255,179,0,0.25); }
+  .status-pill.error   { color: var(--danger);  border-color: rgba(255,68,68,0.25); }
+
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .dot.pulse { animation: pulse 1.4s ease-in-out infinite; }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%       { opacity: 0.4; transform: scale(0.7); }
+  }
+
+  /* ── Viewfinder ── */
+  #viewfinder { flex: 1; position: relative; overflow: hidden; background: #000; }
+
+  #video  { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  #canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+  /* Scanner overlay */
+  .scan-overlay { position: absolute; inset: 0; pointer-events: none; }
+
+  .corner {
+    position: absolute; width: 22px; height: 22px;
+    border-color: var(--accent); border-style: solid; opacity: 0.7;
+  }
+  .corner.tl { top: 16px; left: 16px;   border-width: 2px 0 0 2px; border-radius: 3px 0 0 0; }
+  .corner.tr { top: 16px; right: 16px;  border-width: 2px 2px 0 0; border-radius: 0 3px 0 0; }
+  .corner.bl { bottom: 16px; left: 16px;  border-width: 0 0 2px 2px; border-radius: 0 0 0 3px; }
+  .corner.br { bottom: 16px; right: 16px; border-width: 0 2px 2px 0; border-radius: 0 0 3px 0; }
+
+  .scan-line {
+    position: absolute; left: 16px; right: 16px; height: 1px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    top: 16px; animation: scanline 2.8s ease-in-out infinite; opacity: 0;
+  }
+  @keyframes scanline {
+    0%   { top: 16px; opacity: 0; }
+    10%  { opacity: 0.6; }
+    90%  { opacity: 0.6; }
+    100% { top: calc(100% - 16px); opacity: 0; }
+  }
+
+  /* ── Model picker overlay ── */
+  #model-picker {
+    position: absolute; inset: 0; background: var(--bg);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 20px; padding: 28px; z-index: 40;
+    transition: opacity 0.4s;
+  }
+  #model-picker.hidden { opacity: 0; pointer-events: none; }
+
+  .picker-title {
+    font-size: 14px; font-weight: 700;
+    letter-spacing: 2px; color: var(--accent);
+    text-transform: uppercase;
+  }
+
+  .picker-desc {
+    font-size: 11px; color: var(--muted);
+    line-height: 1.7; max-width: 300px; text-align: center;
+  }
+
+  .picker-desc code {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 4px; padding: 2px 6px;
+    color: var(--accent2); font-size: 10px;
+  }
+
+  .drop-zone {
+    width: 100%; max-width: 320px;
+    border: 2px dashed rgba(0,229,255,0.3);
+    border-radius: 12px; padding: 28px 20px;
+    display: flex; flex-direction: column;
+    align-items: center; gap: 12px;
+    cursor: pointer; transition: all 0.2s;
+    background: var(--surface2);
+  }
+  .drop-zone:hover, .drop-zone.drag-over {
+    border-color: var(--accent);
+    background: rgba(0,229,255,0.05);
+  }
+
+  .drop-icon { font-size: 32px; }
+
+  .drop-label {
+    font-size: 12px; color: var(--muted);
+    letter-spacing: 1px; text-align: center;
+  }
+
+  .drop-label span { color: var(--accent); font-weight: 700; }
+
+  .pick-btn {
+    padding: 10px 24px; border-radius: 8px;
+    background: var(--accent); color: #000;
+    font-family: inherit; font-size: 11px;
+    font-weight: 700; letter-spacing: 1px;
+    text-transform: uppercase; border: none; cursor: pointer;
+  }
+
+  /* Class names input */
+  .classes-wrap {
+    width: 100%; max-width: 320px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .classes-label {
+    font-size: 9px; letter-spacing: 1.5px;
+    color: var(--muted); text-transform: uppercase;
+  }
+  #class-names {
+    width: 100%; padding: 8px 10px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px; color: var(--text);
+    font-family: inherit; font-size: 11px;
+    outline: none; resize: vertical; min-height: 56px;
+  }
+  #class-names:focus { border-color: rgba(0,229,255,0.4); }
+
+  /* Model size selector */
+  .model-size-wrap {
+    width: 100%; max-width: 320px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .model-size-label {
+    font-size: 9px; letter-spacing: 1.5px;
+    color: var(--muted); text-transform: uppercase;
+  }
+  .size-btns { display: flex; gap: 6px; }
+  .size-btn {
+    flex: 1; padding: 7px 4px; border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--surface2); color: var(--muted);
+    font-family: inherit; font-size: 10px;
+    letter-spacing: 0.5px; cursor: pointer; transition: all 0.2s;
+  }
+  .size-btn.active { background: rgba(0,229,255,0.1); color: var(--accent); border-color: rgba(0,229,255,0.35); }
+
+  /* Loading screen */
+  #loading-screen {
+    position: absolute; inset: 0; background: var(--bg);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 20px; z-index: 20; transition: opacity 0.5s;
+  }
+  #loading-screen.hidden { opacity: 0; pointer-events: none; }
+
+  .load-ring {
+    width: 64px; height: 64px; border-radius: 50%;
+    border: 2px solid var(--surface2);
+    border-top-color: var(--accent);
+    border-right-color: var(--accent2);
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .load-label { font-size: 11px; letter-spacing: 2px; color: var(--muted); text-transform: uppercase; }
+
+  .load-progress {
+    width: 140px; height: 2px;
+    background: var(--surface2); border-radius: 1px; overflow: hidden;
+  }
+  .load-bar { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); width: 0%; transition: width 0.4s; }
+
+  /* ── Stats bar ── */
+  #stats {
+    flex-shrink: 0; display: flex;
+    background: var(--surface); border-top: 1px solid var(--border);
+  }
+  .stat {
+    flex: 1; padding: 10px 12px;
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .stat:last-child { border-right: none; }
+  .stat-label { font-size: 9px; letter-spacing: 1.5px; color: var(--muted); text-transform: uppercase; }
+  .stat-value { font-size: 16px; font-weight: 700; color: var(--accent); line-height: 1; }
+  .stat-value.green { color: var(--accent2); }
+  .stat-value.amber { color: var(--warn); }
+
+  /* ── Controls ── */
+  #controls {
+    flex-shrink: 0; display: flex;
+    align-items: center; justify-content: space-between;
+    padding: 12px 16px; background: var(--surface);
+    border-top: 1px solid var(--border); gap: 10px;
+  }
+
+  .ctrl-btn {
+    flex: 1; padding: 10px 8px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--surface2);
+    color: var(--muted); font-family: inherit; font-size: 10px;
+    letter-spacing: 1px; text-transform: uppercase; cursor: pointer;
+    transition: all 0.2s; display: flex; align-items: center;
+    justify-content: center; gap: 5px; -webkit-appearance: none;
+  }
+  .ctrl-btn:active { transform: scale(0.96); }
+  .ctrl-btn.active { background: rgba(0,229,255,0.1); color: var(--accent); border-color: rgba(0,229,255,0.3); }
+  .ctrl-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+
+  .shutter {
+    width: 52px; height: 52px; border-radius: 50%;
+    border: 2px solid var(--accent); background: transparent;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; flex-shrink: 0; transition: all 0.2s; -webkit-appearance: none;
+  }
+  .shutter:active { transform: scale(0.92); background: rgba(0,229,255,0.15); }
+  .shutter.paused { border-color: var(--warn); }
+  .shutter-inner { width: 36px; height: 36px; border-radius: 50%; background: var(--accent); transition: all 0.2s; }
+  .shutter.paused .shutter-inner { background: var(--warn); }
+
+  /* Permission prompt */
+  #permission-prompt {
+    position: absolute; inset: 0; background: var(--bg);
+    display: none; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 16px; padding: 32px; z-index: 30; text-align: center;
+  }
+  #permission-prompt.show { display: flex; }
+
+  .perm-icon {
+    width: 64px; height: 64px; border-radius: 16px;
+    background: var(--surface2); border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .perm-icon svg { width: 32px; height: 32px; color: var(--accent); }
+  .perm-title { font-size: 15px; font-weight: 700; color: var(--text); letter-spacing: 0.5px; }
+  .perm-desc { font-size: 12px; color: var(--muted); line-height: 1.6; max-width: 240px; }
+  .perm-btn {
+    padding: 12px 28px; border-radius: 10px;
+    background: var(--accent); color: #000;
+    font-family: inherit; font-size: 12px;
+    font-weight: 700; letter-spacing: 1px;
+    text-transform: uppercase; border: none; cursor: pointer; -webkit-appearance: none;
+  }
+
+  /* Objects list overlay */
+  #obj-list {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    background: linear-gradient(transparent, rgba(8,12,16,0.9));
+    padding: 32px 12px 12px; pointer-events: none;
+    min-height: 60px; display: flex; flex-wrap: wrap;
+    gap: 5px; align-items: flex-end;
+  }
+  .obj-tag {
+    background: rgba(8,12,16,0.85);
+    border: 1px solid rgba(0,229,255,0.2);
+    border-radius: 4px; padding: 3px 8px;
+    font-size: 11px; letter-spacing: 0.5px;
+    color: var(--accent); white-space: nowrap;
+  }
+  .obj-tag .conf { color: var(--muted); font-size: 10px; margin-left: 4px; }
+
+  /* FPS counter */
+  #fps-display {
+    position: absolute; top: 12px; right: 12px;
+    background: rgba(8,12,16,0.75); border: 1px solid var(--border);
+    border-radius: 4px; padding: 3px 7px; font-size: 11px;
+    color: var(--muted); pointer-events: none; letter-spacing: 0.5px;
+  }
+
+  /* Threshold slider */
+  #threshold-wrap {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 16px; background: var(--surface);
+    border-top: 1px solid var(--border); flex-shrink: 0;
+  }
+  #threshold-wrap label { font-size: 9px; letter-spacing: 1.5px; color: var(--muted); text-transform: uppercase; white-space: nowrap; }
+  #threshold-wrap input[type=range] { flex: 1; accent-color: var(--accent); height: 2px; }
+  #threshold-val { font-size: 12px; color: var(--accent); min-width: 32px; text-align: right; }
+
+  /* Inference canvas (hidden, used for preprocessing) */
+  #infer-canvas { display: none; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <div class="logo">
+      <div class="logo-icon">
+        <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="1" y="1" width="5" height="5" rx="1" stroke="#00e5ff" stroke-width="1.2"/>
+          <rect x="10" y="1" width="5" height="5" rx="1" stroke="#00e5ff" stroke-width="1.2"/>
+          <rect x="1" y="10" width="5" height="5" rx="1" stroke="#00e5ff" stroke-width="1.2"/>
+          <rect x="10" y="10" width="5" height="5" rx="1" stroke="#00ff94" stroke-width="1.2"/>
+        </svg>
+      </div>
+      <span class="logo-text">YOLO</span>
+    </div>
+    <div class="status-pill loading" id="status">
+      <span class="dot pulse"></span>
+      <span id="status-text">INIT</span>
+    </div>
+  </header>
+
+  <div id="viewfinder">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="canvas"></canvas>
+    <canvas id="infer-canvas"></canvas>
+
+    <div class="scan-overlay">
+      <div class="corner tl"></div><div class="corner tr"></div>
+      <div class="corner bl"></div><div class="corner br"></div>
+      <div class="scan-line"></div>
+    </div>
+
+    <div id="fps-display">-- FPS</div>
+    <div id="obj-list"></div>
+
+    <!-- Model picker -->
+    <div id="model-picker">
+      <div class="picker-title">Load Your YOLO Model</div>
+      <div class="picker-desc">
+        First export your weights to ONNX:<br>
+        <code>yolo export model=bestyolosu.pt format=onnx imgsz=640</code><br><br>
+        Then select the generated <code>.onnx</code> file below.
+      </div>
+
+      <div class="model-size-wrap">
+        <div class="model-size-label">Input Size</div>
+        <div class="size-btns">
+          <button class="size-btn" data-size="320">320</button>
+          <button class="size-btn active" data-size="640">640</button>
+          <button class="size-btn" data-size="1280">1280</button>
+        </div>
+      </div>
+
+      <div class="classes-wrap">
+        <div class="classes-label">Class Names (comma-separated)</div>
+        <textarea id="class-names" placeholder="e.g. cat, dog, person, car"></textarea>
+      </div>
+
+      <div class="drop-zone" id="drop-zone">
+        <div class="drop-icon">📦</div>
+        <div class="drop-label">Drop <span>.onnx</span> model here<br>or click to browse</div>
+        <button class="pick-btn" id="pick-btn">Select File</button>
+      </div>
+
+      <input type="file" id="file-input" accept=".onnx" style="display:none">
+    </div>
+
+    <!-- Loading screen -->
+    <div id="loading-screen" class="hidden">
+      <div class="load-ring"></div>
+      <div class="load-label" id="load-label">Loading model...</div>
+      <div class="load-progress"><div class="load-bar" id="load-bar"></div></div>
+    </div>
+
+    <!-- Permission prompt -->
+    <div id="permission-prompt">
+      <div class="perm-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M15 10h.01M3 7a2 2 0 012-2h14a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>
+          <circle cx="15" cy="10" r="2"/>
+          <path d="M6 17l4.5-4.5 3 3 2-2"/>
+        </svg>
+      </div>
+      <div class="perm-title">Camera Access Needed</div>
+      <div class="perm-desc">This app uses your camera to run YOLO detection in real time. No data is stored or transmitted.</div>
+      <button class="perm-btn" id="allow-btn">Allow Camera</button>
+    </div>
+  </div>
+
+  <div id="threshold-wrap">
+    <label>Confidence</label>
+    <input type="range" id="threshold" min="10" max="95" value="40" step="5">
+    <span id="threshold-val">40%</span>
+  </div>
+
+  <div id="stats">
+    <div class="stat">
+      <span class="stat-label">Objects</span>
+      <span class="stat-value green" id="count">0</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Top Match</span>
+      <span class="stat-value" id="top-label" style="font-size:11px;letter-spacing:0.5px;color:var(--muted)">---</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Conf.</span>
+      <span class="stat-value amber" id="top-conf">--</span>
+    </div>
+  </div>
+
+  <div id="controls">
+    <button class="ctrl-btn" id="flip-btn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M20 7H4m16 0l-3-3m3 3l-3 3M4 17h16M4 17l3-3M4 17l3 3"/>
+      </svg>
+      Flip
+    </button>
+    <button class="shutter" id="pause-btn" title="Pause detection">
+      <div class="shutter-inner"></div>
+    </button>
+    <button class="ctrl-btn" id="bbox-btn" onclick="toggleBBox()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
+        <rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/>
+      </svg>
+      Boxes
+    </button>
+  </div>
+</div>
+
+<script>
+// ── Point ONNX Runtime to its WASM files on jsDelivr ──────────────────────
+ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';
+
+// ── DOM refs ──────────────────────────────────────────────────────────────
+const video        = document.getElementById('video');
+const canvas       = document.getElementById('canvas');
+const inferCanvas  = document.getElementById('infer-canvas');
+const ctx          = canvas.getContext('2d');
+const ictx         = inferCanvas.getContext('2d');
+const statusEl     = document.getElementById('status');
+const statusText   = document.getElementById('status-text');
+const loadBar      = document.getElementById('load-bar');
+const loadLabel    = document.getElementById('load-label');
+const loadScreen   = document.getElementById('loading-screen');
+const modelPicker  = document.getElementById('model-picker');
+const permPrompt   = document.getElementById('permission-prompt');
+const fpsDisplay   = document.getElementById('fps-display');
+const objList      = document.getElementById('obj-list');
+const countEl      = document.getElementById('count');
+const topLabel     = document.getElementById('top-label');
+const topConf      = document.getElementById('top-conf');
+const thresholdInput = document.getElementById('threshold');
+const thresholdVal   = document.getElementById('threshold-val');
+
+// ── State ─────────────────────────────────────────────────────────────────
+let session     = null;
+let classNames  = [];
+let inputSize   = 640;
+let isRunning   = false;
+let isPaused    = false;
+let showBoxes   = true;
+let facingMode  = 'environment';
+let stream      = null;
+let frameCount  = 0;
+let lastFpsTime = performance.now();
+let detections  = [];
+let threshold   = 0.40;
+let animId      = null;
+
+// ── Colours ───────────────────────────────────────────────────────────────
+const COLORS = [
+  '#00e5ff','#00ff94','#ffb300','#ff6b6b','#c084fc',
+  '#fb923c','#34d399','#60a5fa','#f472b6','#a3e635'
+];
+const colorMap = {};
+function getColor(label) {
+  if (!colorMap[label]) colorMap[label] = COLORS[Object.keys(colorMap).length % COLORS.length];
+  return colorMap[label];
+}
+
+// ── Status helper ─────────────────────────────────────────────────────────
+function setStatus(state, text) {
+  statusEl.className = 'status-pill ' + state;
+  statusText.textContent = text;
+  statusEl.querySelector('.dot').className = 'dot' + (state === 'active' ? '' : ' pulse');
+}
+
+// ── Model-size selector ───────────────────────────────────────────────────
+document.querySelectorAll('.size-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.size-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    inputSize = parseInt(btn.dataset.size);
+  });
+});
+
+// ── File picker / drop zone ───────────────────────────────────────────────
+const fileInput = document.getElementById('file-input');
+const dropZone  = document.getElementById('drop-zone');
+const pickBtn   = document.getElementById('pick-btn');
+
+pickBtn.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('click', e => { if (e.target !== pickBtn) fileInput.click(); });
+
+dropZone.addEventListener('dragover',  e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); dropZone.classList.remove('drag-over');
+  const f = e.dataTransfer.files[0];
+  if (f) handleModelFile(f);
+});
+
+fileInput.addEventListener('change', () => { if (fileInput.files[0]) handleModelFile(fileInput.files[0]); });
+
+async function handleModelFile(file) {
+  // Parse class names from textarea
+  const raw = document.getElementById('class-names').value.trim();
+  classNames = raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : [];
+
+  modelPicker.classList.add('hidden');
+  loadScreen.classList.remove('hidden');
+  setStatus('loading', 'MODEL');
+
+  loadLabel.textContent = 'Reading ONNX file…';
+  loadBar.style.width = '20%';
+
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+
+    loadLabel.textContent = 'Creating ONNX session…';
+    loadBar.style.width = '55%';
+
+    session = await ort.InferenceSession.create(arrayBuffer, {
+      executionProviders: ['wasm'],
+      graphOptimizationLevel: 'all'
+    });
+
+    // Inspect model inputs to verify shape
+    const inputName = session.inputNames[0];
+    console.log('Model inputs:', session.inputNames);
+    console.log('Model outputs:', session.outputNames);
+
+    loadBar.style.width = '100%';
+    loadLabel.textContent = 'Ready!';
+    await new Promise(r => setTimeout(r, 400));
+    loadScreen.classList.add('hidden');
+
+    const camOk = await startCamera();
+    if (!camOk) { setStatus('error', 'NO CAM'); return; }
+
+    setStatus('active', 'LIVE');
+    isRunning = true;
+    detect();
+  } catch(e) {
+    console.error('Model load error:', e);
+    loadLabel.textContent = 'Error: ' + e.message;
+    loadBar.style.width = '0%';
+    setStatus('error', 'ERROR');
+  }
+}
+
+// ── Camera ────────────────────────────────────────────────────────────────
+async function startCamera() {
+  try {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: facingMode }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+    video.srcObject = stream;
+    const mirror = facingMode === 'user' ? 'scaleX(-1)' : 'scaleX(1)';
+    video.style.transform = mirror;
+    canvas.style.transform = mirror;
+    await new Promise(r => video.onloadedmetadata = r);
+    video.play();
+    permPrompt.classList.remove('show');
+    return true;
+  } catch(e) {
+    console.error('Camera error:', e);
+    permPrompt.classList.add('show');
+    return false;
+  }
+}
+
+// ── Canvas resize ─────────────────────────────────────────────────────────
+function resizeCanvas() {
+  const rect = video.getBoundingClientRect();
+  canvas.width  = rect.width  * devicePixelRatio;
+  canvas.height = rect.height * devicePixelRatio;
+  canvas.style.width  = rect.width  + 'px';
+  canvas.style.height = rect.height + 'px';
+}
+
+// ── YOLO Preprocessing ────────────────────────────────────────────────────
+// Returns Float32Array in CHW format, plus letterbox padding info
+function preprocess(videoEl) {
+  const S = inputSize;
+  inferCanvas.width  = S;
+  inferCanvas.height = S;
+
+  // Letterbox: scale video to fit inside SxS, centered on black background
+  const vw = videoEl.videoWidth;
+  const vh = videoEl.videoHeight;
+  const scale = Math.min(S / vw, S / vh);
+  const nw = Math.round(vw * scale);
+  const nh = Math.round(vh * scale);
+  const padX = (S - nw) / 2;
+  const padY = (S - nh) / 2;
+
+  ictx.fillStyle = '#000';
+  ictx.fillRect(0, 0, S, S);
+  ictx.drawImage(videoEl, padX, padY, nw, nh);
+
+  const imageData = ictx.getImageData(0, 0, S, S).data; // RGBA
+  const tensor = new Float32Array(3 * S * S);
+
+  // Convert to normalized CHW (R, G, B planes)
+  for (let i = 0; i < S * S; i++) {
+    tensor[0 * S * S + i] = imageData[i * 4 + 0] / 255; // R
+    tensor[1 * S * S + i] = imageData[i * 4 + 1] / 255; // G
+    tensor[2 * S * S + i] = imageData[i * 4 + 2] / 255; // B
+  }
+
+  return { tensor, padX, padY, scale, S };
+}
+
+// ── Non-Maximum Suppression (IoU-based) ──────────────────────────────────
+function iou(a, b) {
+  const x1 = Math.max(a.x1, b.x1), y1 = Math.max(a.y1, b.y1);
+  const x2 = Math.min(a.x2, b.x2), y2 = Math.min(a.y2, b.y2);
+  const inter = Math.max(0, x2-x1) * Math.max(0, y2-y1);
+  const aArea = (a.x2-a.x1) * (a.y2-a.y1);
+  const bArea = (b.x2-b.x1) * (b.y2-b.y1);
+  return inter / (aArea + bArea - inter + 1e-6);
+}
+
+function nms(boxes, iouThresh = 0.45) {
+  boxes.sort((a, b) => b.score - a.score);
+  const keep = [];
+  const suppressed = new Uint8Array(boxes.length);
+  for (let i = 0; i < boxes.length; i++) {
+    if (suppressed[i]) continue;
+    keep.push(boxes[i]);
+    for (let j = i + 1; j < boxes.length; j++) {
+      if (!suppressed[j] && iou(boxes[i], boxes[j]) > iouThresh) suppressed[j] = 1;
+    }
+  }
+  return keep;
+}
+
+// ── YOLO Postprocessing ───────────────────────────────────────────────────
+// Handles both YOLOv8 shape [1, 4+nc, na] and transposed [1, na, 4+nc]
+function postprocess(outputData, outputShape, padX, padY, scale, S, thresh) {
+  let numAnchors, numFields;
+  let transposed = false;
+
+  // YOLOv8 default: [1, 4+nc, numAnchors]
+  if (outputShape[1] < outputShape[2]) {
+    numFields  = outputShape[1];
+    numAnchors = outputShape[2];
+  } else {
+    // Transposed: [1, numAnchors, 4+nc]
+    numAnchors = outputShape[1];
+    numFields  = outputShape[2];
+    transposed = true;
+  }
+
+  const nc = numFields - 4;
+  const raw = [];
+
+  for (let i = 0; i < numAnchors; i++) {
+    let cx, cy, w, h, classScores;
+
+    if (!transposed) {
+      cx = outputData[0 * numAnchors + i];
+      cy = outputData[1 * numAnchors + i];
+      w  = outputData[2 * numAnchors + i];
+      h  = outputData[3 * numAnchors + i];
+      classScores = [];
+      for (let c = 0; c < nc; c++) classScores.push(outputData[(4 + c) * numAnchors + i]);
+    } else {
+      cx = outputData[i * numFields + 0];
+      cy = outputData[i * numFields + 1];
+      w  = outputData[i * numFields + 2];
+      h  = outputData[i * numFields + 3];
+      classScores = [];
+      for (let c = 0; c < nc; c++) classScores.push(outputData[i * numFields + 4 + c]);
+    }
+
+    // Find best class
+    let bestScore = 0, bestClass = 0;
+    for (let c = 0; c < nc; c++) {
+      if (classScores[c] > bestScore) { bestScore = classScores[c]; bestClass = c; }
+    }
+
+    if (bestScore < thresh) continue;
+
+    // Convert from model-space to original video coords
+    const x1m = cx - w / 2, y1m = cy - h / 2;
+    const x2m = cx + w / 2, y2m = cy + h / 2;
+
+    // Remove letterbox offset and scale back to video dimensions
+    const x1 = (x1m - padX) / scale;
+    const y1 = (y1m - padY) / scale;
+    const x2 = (x2m - padX) / scale;
+    const y2 = (y2m - padY) / scale;
+
+    raw.push({ x1, y1, x2, y2, score: bestScore, classId: bestClass,
+      class: classNames[bestClass] || `class_${bestClass}` });
+  }
+
+  return nms(raw);
+}
+
+// ── Draw detections ───────────────────────────────────────────────────────
+function drawDetections(dets) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!showBoxes || dets.length === 0) return;
+
+  const scaleX = canvas.width  / video.videoWidth;
+  const scaleY = canvas.height / video.videoHeight;
+
+  dets.forEach(d => {
+    let { x1, y1, x2, y2, score, class: label } = d;
+
+    if (facingMode === 'user') {
+      const vw = video.videoWidth;
+      [x1, x2] = [vw - x2, vw - x1];
+    }
+
+    const color = getColor(label);
+    const sx = x1 * scaleX, sy = y1 * scaleY;
+    const sw = (x2 - x1) * scaleX, sh = (y2 - y1) * scaleY;
+    const conf = (score * 100).toFixed(0);
+
+    // Box
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2 * devicePixelRatio;
+    ctx.strokeRect(sx, sy, sw, sh);
+
+    // Corner accents
+    const c = 12 * devicePixelRatio;
+    ctx.lineWidth = 3 * devicePixelRatio;
+    [[sx,sy,c,0,0,c],[sx+sw,sy,-c,0,0,c],[sx,sy+sh,c,0,0,-c],[sx+sw,sy+sh,-c,0,0,-c]].forEach(([cx,cy,dx1,_,__,dy2]) => {
+      ctx.beginPath(); ctx.moveTo(cx+dx1, cy); ctx.lineTo(cx, cy); ctx.lineTo(cx, cy+dy2); ctx.stroke();
+    });
+
+    // Label badge
+    const fontSize = 11 * devicePixelRatio;
+    ctx.font = `700 ${fontSize}px "SF Mono", monospace`;
+    const labelText = label.toUpperCase() + ' ' + conf + '%';
+    const tw = ctx.measureText(labelText).width;
+    const th = fontSize + 8 * devicePixelRatio;
+    const tx = sx, ty = sy - th - 2;
+
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.roundRect(tx, ty < 0 ? sy + 2 : ty, tw + 10 * devicePixelRatio, th, 3);
+    ctx.fill();
+
+    ctx.fillStyle = '#000';
+    ctx.fillText(labelText, tx + 5 * devicePixelRatio, (ty < 0 ? sy + 2 : ty) + fontSize + 2 * devicePixelRatio);
+  });
+}
+
+// ── Update stats UI ───────────────────────────────────────────────────────
+function updateUI(dets) {
+  countEl.textContent = dets.length;
+  objList.innerHTML = '';
+
+  if (dets.length === 0) { topLabel.textContent = '---'; topConf.textContent = '--'; return; }
+
+  const sorted = [...dets].sort((a, b) => b.score - a.score);
+  topLabel.textContent = sorted[0].class.toUpperCase();
+  topConf.textContent  = (sorted[0].score * 100).toFixed(0) + '%';
+
+  const seen = new Set();
+  sorted.forEach(d => {
+    if (seen.has(d.class)) return;
+    seen.add(d.class);
+    const tag = document.createElement('div');
+    tag.className = 'obj-tag';
+    tag.innerHTML = `${d.class}<span class="conf">${(d.score * 100).toFixed(0)}%</span>`;
+    tag.style.borderColor = getColor(d.class) + '44';
+    tag.style.color = getColor(d.class);
+    objList.appendChild(tag);
+  });
+}
+
+// ── Detect loop ───────────────────────────────────────────────────────────
+async function detect() {
+  if (!session || isPaused || video.paused || video.ended) {
+    animId = requestAnimationFrame(detect);
+    return;
+  }
+
+  resizeCanvas();
+
+  try {
+    const { tensor, padX, padY, scale, S } = preprocess(video);
+
+    const inputName  = session.inputNames[0];
+    const outputName = session.outputNames[0];
+
+    const inputTensor = new ort.Tensor('float32', tensor, [1, 3, S, S]);
+    const feeds = { [inputName]: inputTensor };
+
+    const results = await session.run(feeds);
+    const output  = results[outputName];
+
+    detections = postprocess(
+      output.data, output.dims,
+      padX, padY, scale, S,
+      threshold
+    );
+
+    drawDetections(detections);
+    updateUI(detections);
+  } catch(e) {
+    console.error('Inference error:', e);
+  }
+
+  frameCount++;
+  const now = performance.now();
+  if (now - lastFpsTime >= 1000) {
+    fpsDisplay.textContent = (frameCount / ((now - lastFpsTime) / 1000)).toFixed(0) + ' FPS';
+    frameCount = 0;
+    lastFpsTime = now;
+  }
+
+  animId = requestAnimationFrame(detect);
+}
+
+// ── Button handlers ───────────────────────────────────────────────────────
+document.getElementById('allow-btn').addEventListener('click', async () => {
+  permPrompt.classList.remove('show');
+  const camOk = await startCamera();
+  if (camOk && session) { isRunning = true; detect(); }
+  else if (!camOk) { setStatus('error', 'NO CAM'); }
+});
+
+document.getElementById('pause-btn').addEventListener('click', () => {
+  isPaused = !isPaused;
+  document.getElementById('pause-btn').classList.toggle('paused', isPaused);
+  setStatus(isPaused ? 'loading' : 'active', isPaused ? 'PAUSED' : 'LIVE');
+  if (!isPaused) ctx.clearRect(0, 0, canvas.width, canvas.height);
+});
+
+document.getElementById('flip-btn').addEventListener('click', async () => {
+  facingMode = facingMode === 'environment' ? 'user' : 'environment';
+  await startCamera();
+});
+
+function toggleBBox() {
+  showBoxes = !showBoxes;
+  document.getElementById('bbox-btn').classList.toggle('active', showBoxes);
+  if (!showBoxes) ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+document.getElementById('bbox-btn').classList.add('active');
+
+thresholdInput.addEventListener('input', () => {
+  threshold = parseInt(thresholdInput.value) / 100;
+  thresholdVal.textContent = thresholdInput.value + '%';
+});
+
+window.addEventListener('resize', resizeCanvas);
+
+// Start with model picker showing
+setStatus('loading', 'LOAD MODEL');
+</script>
+</body>
+</html>
